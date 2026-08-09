@@ -20,6 +20,10 @@ class UserRepository(ABC):
         pass
 
     @abstractmethod
+    def get_by_id(self, user_id: int, ) -> Optional[User]:
+        pass
+
+    @abstractmethod
     def mark_onboarding_completed(
         self,
         user: User,
@@ -37,6 +41,13 @@ class SQLAlchemyUserRepository(
 
     def __init__(self, db: Session):
         super().__init__(db, User)
+
+    def get_by_id(self, user_id: int) -> Optional[User]:
+        return (
+            self.db.query(User)
+            .filter(User.id == user_id)
+            .first()
+        )
 
     def get_by_telegram_id(
         self,

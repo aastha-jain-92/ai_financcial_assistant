@@ -49,3 +49,10 @@ class BaseRepository(Generic[ModelType]):
     def delete(self, obj: ModelType):
         self.db.delete(obj)
         self.db.commit()
+
+def get_by_id(self, id: int):
+    return (
+        self.db.query(self.model)
+        .filter(self.model.id == id)
+        .first()
+    )

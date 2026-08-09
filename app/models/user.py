@@ -55,3 +55,9 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    conversation_history = relationship(
+        "ConversationHistory",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        order_by="ConversationHistory.created_at",
+    )

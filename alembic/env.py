@@ -7,6 +7,7 @@ from app.models.user import User
 from app.models.user_preference import UserPreference
 from app.models.watchlist import Watchlist
 from app.models.notification_preference import NotificationPreference
+from app.models.conversation import ConversationHistory
 from alembic import context
 
 # this is the Alembic Config object, which provides

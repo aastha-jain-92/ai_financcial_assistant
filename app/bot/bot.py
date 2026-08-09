@@ -7,9 +7,10 @@ import atexit
 from pathlib import Path
 from dotenv import load_dotenv
 
-from telegram.ext import Application
+from telegram.ext import Application,MessageHandler,filters
 
 from app.bot.handlers.onboarding import onboarding_handler
+from app.bot.handlers.chat import chat_handler
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -77,6 +78,12 @@ def main():
 
     application.add_handler(
         onboarding_handler
+    )
+    application.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            chat_handler,
+        )
     )
 
 
