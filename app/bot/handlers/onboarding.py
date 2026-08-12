@@ -1,8 +1,4 @@
 # app/telegram/handlers/onboarding.py
-from app.database.database import SessionLocal
-from urllib.parse import urlencode
-import os
-import secrets
 from telegram import Update
 from telegram.ext import (
     ContextTypes,
@@ -28,28 +24,18 @@ from app.bot.keyboards import (
     integrations_keyboard,
 )
 
-from app.repositories.user_repository import SQLAlchemyUserRepository
-from app.repositories.user_integration_repository import (
-    SQLAlchemyUserIntegrationRepository,
+from app.bot.handlers.integrations import (
+    build_authorization_link,
+    connected_services_for,
+    disconnect_service,
 )
+from app.providers.google import SERVICE_LABELS, normalize_service
 from app.services.onboarding_service import OnboardingService
 from app.database.database import SessionLocal
 
 import logging
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------
-# Service display names
-# ---------------------------------------------------------
-
-SERVICE_LABELS = {
-    "gmail": "📧 Gmail",
-    "google_calendar": "📅 Google Calendar",
-    "google_drive": "📁 Google Drive",
-    "google_sheets": "📊 Google Sheets",
-}
 
 
 def normalize_role(value: str | None):
@@ -258,115 +244,53 @@ async def integrations_callback(
     # Connect a service
     # ---------------------------------------------------------
 
+    if data.startswith("integration_disconnect_"):
+        service = data.replace("integration_disconnect_", "")
+
+        message = await disconnect_service(
+            telegram_id=update.effective_user.id,
+            service_name=service,
+        )
+
+        await query.edit_message_text(message)
+        return None
+
     if data.startswith("integration_connect_"):
-        service = data.replace("integration_connect_", "")
+        service = normalize_service(
+            data.replace("integration_connect_", "")
+        )
         label = SERVICE_LABELS.get(service, service)
 
-        # Record the intent in user_data
-        connected = context.user_data.setdefault(
-            "connected_services", []
+        oauth_url, error = build_authorization_link(
+            telegram_id=update.effective_user.id,
+            service_name=service,
+            chat_id=update.effective_chat.id,
         )
 
-        if service not in connected:
-            connected.append(service)
+        if error:
+            await query.edit_message_text(f"❌ {error}")
+            return None
 
-        # Persist to database
-        db = SessionLocal()
-        try:
-            user_repo = SQLAlchemyUserRepository(db)
-            user = user_repo.get_by_telegram_id(
-                update.effective_user.id
-            )
-
-            if user:
-                integration_repo = (
-                    SQLAlchemyUserIntegrationRepository(db)
-                )
-                integration_repo.create_or_update(
-                    user_id=user.id,
-                    service_name=service,
-                    is_connected=False,  # placeholder until real OAuth
-                )
-                db.commit()
-        except Exception:
-            db.rollback()
-            logger.exception("Failed to save integration intent")
-        finally:
-            db.close()
-
-        # Send placeholder OAuth link
-        
-
-
-        client_id = os.getenv("GOOGLE_CLIENT_ID")
-        redirect_uri = os.getenv("GOOGLE_REDIRECT_URI")
-
-        if not client_id or not redirect_uri:
-            await query.edit_message_text(
-            "❌ Google OAuth is not configured correctly.\n\n"
-            "Check GOOGLE_CLIENT_ID and GOOGLE_REDIRECT_URI in your .env file."
+        await query.edit_message_text(
+            f"🔗 *Connect {label}*\n\n"
+            "Open the link below, approve read-only access, then come "
+            "back here — I'll confirm as soon as it's linked.\n\n"
+            f"{oauth_url}\n\n"
+            "_The link is single-use and expires in a few minutes._",
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
         )
-            return
 
-        scopes = {
-        "gmail": [
-            "openid",
-            "https://www.googleapis.com/auth/userinfo.email",
-            "https://www.googleapis.com/auth/gmail.readonly",
-        ],
+        await query.message.reply_text(
+            "Would you like to connect anything else?",
+            reply_markup=integrations_keyboard(
+                connected=connected_services_for(
+                    update.effective_user.id
+                )
+            ),
+        )
 
-        "google_sheets": [
-            "openid",
-            "https://www.googleapis.com/auth/userinfo.email",
-            "https://www.googleapis.com/auth/spreadsheets",
-        ],
-
-        "google_drive": [
-            "openid",
-            "https://www.googleapis.com/auth/userinfo.email",
-            "https://www.googleapis.com/auth/drive.readonly",
-        ],
-
-        "google_calendar": [
-            "openid",
-            "https://www.googleapis.com/auth/userinfo.email",
-            "https://www.googleapis.com/auth/calendar.readonly",
-        ],
-    
-        }
-
-    # Generate a unique state value
-    state = secrets.token_urlsafe(32)
-
-    params = {
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
-        "response_type": "code",
-        "scope": " ".join(scopes[service]),
-        "access_type": "offline",
-        "prompt": "consent",
-        "state": state,
-    }
-
-    oauth_url = (
-        "https://accounts.google.com/o/oauth2/v2/auth?"
-        + urlencode(params)
-    )
-
-    logger.info("Google OAuth URL: %s", oauth_url)
-
-    await query.edit_message_text(
-        f"🔗 Connect {label}:\n\n"
-        f"{oauth_url}",
-    )
-
-    await query.message.reply_text(
-    "Would you like to connect anything else?",
-    reply_markup=integrations_keyboard(
-        connected=connected
-        ),
-    )
-    return
+    return None
 
 
 onboarding_handler = ConversationHandler(

@@ -1,5 +1,8 @@
+import asyncio
 import json
+import logging
 import os
+from typing import Any, Dict, List
 
 from groq import AsyncGroq
 from sqlalchemy.orm import Session
@@ -20,12 +23,31 @@ from app.services.conversation_service import (
     ConversationService,
 )
 
+from app.services.google.google_service import (
+    GoogleDataService,
+)
+
 from app.services.prompt_builder import (
     PromptBuilder,
 )
 
+from app.services.tools import (
+    ToolRegistry,
+    build_finance_tools,
+    build_google_tools,
+    google_tools_prompt,
+)
+
 from app.services.yahoo_service import (
     YahooFinanceService,
+)
+
+logger = logging.getLogger(__name__)
+
+MAX_TOOL_ITERATIONS = int(os.getenv("MAX_TOOL_ITERATIONS", "5"))
+VISION_MODEL = os.getenv(
+    "VISION_MODEL_NAME",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
 )
 
 
@@ -33,18 +55,20 @@ class AIService:
     """
     Orchestrates the complete AI conversation flow.
 
-    Responsibilities:
-
-    1. Load user
-    2. Load user preferences
-    3. Load watchlist
-    4. Load conversation history
-    5. Ask PromptBuilder to build messages
-    6. Call Groq
-    7. Save conversation
-    8. Return AI response
-
-    AIService does NOT contain the actual system prompt.
+    User question (Telegram)
+          ↓
+    Load user, preferences, watchlist, history
+          ↓
+    Build prompt + the tool set the user actually has access to
+    (market data + their connected Google services)
+          ↓
+    Groq decides which tools to call
+          ↓
+    Tools hit Yahoo Finance / Google APIs with the user's OAuth token
+          ↓
+    Results are fed back to Groq
+          ↓
+    Final answer is saved and returned to Telegram
     """
 
     def __init__(self, db: Session):
@@ -65,80 +89,6 @@ class AIService:
         )
 
         self.yahoo_service = YahooFinanceService()
-        self.tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_quote",
-                    "description": "Get current stock price and quote details for a ticker symbol.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "ticker": {"type": "string", "description": "The stock ticker symbol (e.g. AAPL)"}
-                        },
-                        "required": ["ticker"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_history",
-                    "description": "Get historical stock price data for a ticker.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "ticker": {"type": "string"},
-                            "period": {"type": "string", "description": "Period (e.g. 1mo, 1y)"},
-                            "interval": {"type": "string", "description": "Interval (e.g. 1d)"}
-                        },
-                        "required": ["ticker"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_financials",
-                    "description": "Get financial statements for a ticker.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "ticker": {"type": "string"}
-                        },
-                        "required": ["ticker"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_news",
-                    "description": "Get latest news for a ticker.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "ticker": {"type": "string"}
-                        },
-                        "required": ["ticker"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_research",
-                    "description": "Get research, recommendations, and sector information for a ticker.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "ticker": {"type": "string"}
-                        },
-                        "required": ["ticker"]
-                    }
-                }
-            }
-        ]
 
         # -----------------------------------------------
         # Repositories
@@ -181,66 +131,21 @@ class AIService:
         history_limit: int = 10,
         base64_image: str = None,
     ) -> str:
-        """
-        Complete AI conversation workflow.
 
-        User Question
-              ↓
-        Load User
-              ↓
-        Load Preferences
-              ↓
-        Load Watchlist
-              ↓
-        Load History
-              ↓
-        PromptBuilder
-              ↓
-        Groq
-              ↓
-        Save Conversation
-              ↓
-        Return Response
-        """
-
-        # -----------------------------------------------
-        # 1. Load user
-        # -----------------------------------------------
-
-        user = (
-            self.user_repository.get_by_id(
-                user_id
-            )
-        )
+        user = self.user_repository.get_by_id(user_id)
 
         if not user:
             raise ValueError(
                 f"User with id {user_id} not found."
             )
 
-        # -----------------------------------------------
-        # 2. Load user preferences
-        # -----------------------------------------------
-
         user_preference = (
-            self.preference_repository.get_by_user_id(
-                user_id
-            )
+            self.preference_repository.get_by_user_id(user_id)
         )
-
-        # -----------------------------------------------
-        # 3. Load watchlist
-        # -----------------------------------------------
 
         watchlist = (
-            self.watchlist_repository.get_by_user_id(
-                user_id
-            )
+            self.watchlist_repository.get_by_user_id(user_id)
         )
-
-        # -----------------------------------------------
-        # 4. Load conversation history
-        # -----------------------------------------------
 
         history = (
             self.conversation_service.get_recent_messages(
@@ -250,7 +155,21 @@ class AIService:
         )
 
         # -----------------------------------------------
-        # 5. Build personalized system prompt
+        # Tools available to this specific user
+        # -----------------------------------------------
+
+        google_service = GoogleDataService(self.db, user_id)
+        connected_services = google_service.connected_services()
+
+        registry = ToolRegistry(
+            build_finance_tools(self.yahoo_service)
+        )
+        registry.extend(
+            build_google_tools(google_service, connected_services)
+        )
+
+        # -----------------------------------------------
+        # Prompt
         # -----------------------------------------------
 
         system_prompt = (
@@ -259,118 +178,27 @@ class AIService:
                 user_preference=user_preference,
                 watchlist=watchlist,
             )
+            + "\n\n"
+            + google_tools_prompt(connected_services)
         )
 
-        # -----------------------------------------------
-        # 6. Build complete Groq messages
-        # -----------------------------------------------
-
-        messages = (
-            self.prompt_builder.build_messages(
-                system_prompt=system_prompt,
-                history=history,
-                current_question=message,
-                base64_image=base64_image,
-            )
+        messages = self.prompt_builder.build_messages(
+            system_prompt=system_prompt,
+            history=history,
+            current_question=message,
+            base64_image=base64_image,
         )
 
-        # Temporarily use vision model if image is provided
-        current_model = self.model
-        if base64_image:
-            current_model = "llama-3.2-90b-vision-preview"
+        # Vision requests use a different model that has no tool support.
+        current_model = VISION_MODEL if base64_image else self.model
+        tools_enabled = not base64_image
 
-        # -----------------------------------------------
-        # 7. Call Groq
-        # -----------------------------------------------
-
-        max_iterations = 5
-        assistant_response = None
-        for _ in range(max_iterations):
-            response = await self.client.chat.completions.create(
-                model=current_model,
-                messages=messages,
-                temperature=0.3,
-                max_completion_tokens=700,
-                tools=self.tools,
-                tool_choice="auto",
-            )
-
-            # -----------------------------------------------
-            # 8. Extract response & Handle Tool Calls
-            # -----------------------------------------------
-
-            response_message = response.choices[0].message
-
-            if not response_message.tool_calls:
-                assistant_response = response_message.content
-                break
-
-            message_dict = {
-                "role": response_message.role,
-                "content": response_message.content or "",
-                "tool_calls": [
-                    {
-                        "id": t.id,
-                        "type": t.type,
-                        "function": {
-                            "name": t.function.name,
-                            "arguments": t.function.arguments,
-                        }
-                    } for t in response_message.tool_calls
-                ]
-            }
-            messages.append(message_dict)
-
-            for tool_call in response_message.tool_calls:
-                function_name = tool_call.function.name
-                function_args = json.loads(tool_call.function.arguments)
-
-                tool_result = ""
-                try:
-                    if function_name == "get_quote":
-                        res = await self.yahoo_service.quote(ticker=function_args.get("ticker"))
-                        tool_result = json.dumps(res)
-                    elif function_name == "get_history":
-                        res = await self.yahoo_service.history(
-                            ticker=function_args.get("ticker"), 
-                            period=function_args.get("period", "1mo"),
-                            interval=function_args.get("interval", "1d")
-                        )
-                        tool_result = json.dumps(res)
-                    elif function_name == "get_financials":
-                        res = await self.yahoo_service.financials(ticker=function_args.get("ticker"))
-                        tool_result = json.dumps(res)
-                    elif function_name == "get_news":
-                        res = await self.yahoo_service.news(ticker=function_args.get("ticker"))
-                        tool_result = json.dumps(res)
-                    elif function_name == "get_research":
-                        res = await self.yahoo_service.research(ticker=function_args.get("ticker"))
-                        tool_result = json.dumps(res)
-                    else:
-                        tool_result = f"Unknown function: {function_name}"
-                except Exception as e:
-                    tool_result = f"Error calling function {function_name}: {str(e)}"
-
-                messages.append(
-                    {
-                        "tool_call_id": tool_call.id,
-                        "role": "tool",
-                        "name": function_name,
-                        "content": tool_result or "{}",
-                    }
-                )
-        else:
-            assistant_response = "I had to call too many functions and couldn't finish."
-
-        if not assistant_response:
-
-            raise ValueError(
-                "Groq returned an empty response."
-            )
-
-        # -----------------------------------------------
-        # 9. Save conversation
-        # -----------------------------------------------
+        assistant_response = await self._run_completion_loop(
+            model=current_model,
+            messages=messages,
+            registry=registry,
+            tools_enabled=tools_enabled,
+        )
 
         self.conversation_service.save_exchange(
             user_id=user_id,
@@ -378,9 +206,115 @@ class AIService:
             assistant_response=assistant_response,
         )
 
-        # -----------------------------------------------
-        # 10. Return response
-        # -----------------------------------------------
-
         return assistant_response
 
+    # ===================================================
+    # GROQ + TOOL CALLING LOOP
+    # ===================================================
+
+    async def _run_completion_loop(
+        self,
+        model: str,
+        messages: List[Dict[str, Any]],
+        registry: ToolRegistry,
+        tools_enabled: bool,
+    ) -> str:
+
+        for iteration in range(MAX_TOOL_ITERATIONS):
+
+            request: Dict[str, Any] = {
+                "model": model,
+                "messages": messages,
+                "temperature": 0.3,
+                "max_completion_tokens": 700,
+            }
+
+            if tools_enabled and len(registry):
+                request["tools"] = registry.schemas
+                request["tool_choice"] = "auto"
+
+            response = await self.client.chat.completions.create(
+                **request
+            )
+
+            response_message = response.choices[0].message
+            tool_calls = getattr(
+                response_message, "tool_calls", None
+            )
+
+            if not tool_calls:
+                content = (response_message.content or "").strip()
+
+                if content:
+                    return content
+
+                logger.warning(
+                    "Groq returned an empty response (iteration %s)",
+                    iteration,
+                )
+                return (
+                    "I couldn't produce an answer for that. "
+                    "Could you rephrase your question?"
+                )
+
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": response_message.content or "",
+                    "tool_calls": [
+                        {
+                            "id": call.id,
+                            "type": call.type,
+                            "function": {
+                                "name": call.function.name,
+                                "arguments": call.function.arguments,
+                            },
+                        }
+                        for call in tool_calls
+                    ],
+                }
+            )
+
+            results = await asyncio.gather(
+                *[
+                    registry.execute(
+                        call.function.name,
+                        _parse_arguments(call.function.arguments),
+                    )
+                    for call in tool_calls
+                ]
+            )
+
+            for call, result in zip(tool_calls, results):
+                messages.append(
+                    {
+                        "tool_call_id": call.id,
+                        "role": "tool",
+                        "name": call.function.name,
+                        "content": result,
+                    }
+                )
+
+        logger.warning(
+            "Tool-calling loop hit the %s iteration limit",
+            MAX_TOOL_ITERATIONS,
+        )
+
+        return (
+            "I looked up quite a lot of data but couldn't finish the "
+            "answer. Could you narrow the question down a little?"
+        )
+
+
+def _parse_arguments(raw_arguments: str) -> Dict[str, Any]:
+
+    if not raw_arguments:
+        return {}
+
+    try:
+        parsed = json.loads(raw_arguments)
+    except json.JSONDecodeError:
+        logger.warning("Invalid tool arguments: %s", raw_arguments)
+        return {}
+
+    return parsed if isinstance(parsed, dict) else {}

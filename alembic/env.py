@@ -9,6 +9,7 @@ from app.models.watchlist import Watchlist
 from app.models.notification_preference import NotificationPreference
 from app.models.conversation import ConversationHistory
 from app.models.user_integration import UserIntegration
+from app.models.oauth_state import OAuthState
 
 from alembic import context
 
