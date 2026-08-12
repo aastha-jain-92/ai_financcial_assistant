@@ -1,0 +1,17 @@
+alembic==1.19.1
+beautifulsoup4==4.15.0
+cryptography==50.0.0
+fastapi==0.141.1
+groq==1.6.0
+httpx==0.28.1
+psycopg2-binary==2.9.12
+pydantic==2.13.4
+python-dotenv==1.2.2
+python-telegram-bot==22.8
+SQLAlchemy==2.0.52
+uvicorn==0.40.0
+yfinance==1.5.2
+
+# Development
+flake8==7.3.0
+pytest==9.1.1

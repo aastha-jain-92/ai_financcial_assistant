@@ -2,9 +2,11 @@ from sqlalchemy import (
     Column,
     Integer,
     String,
+    Text,
     Boolean,
     DateTime,
     ForeignKey,
+    UniqueConstraint,
 )
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
@@ -21,6 +23,14 @@ class UserIntegration(Base):
     """
 
     __tablename__ = "user_integrations"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "service_name",
+            name="uq_user_integration_service",
+        ),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
 
@@ -52,12 +62,31 @@ class UserIntegration(Base):
         nullable=True,
     )
 
-    access_token = Column(String(512), nullable=True)
-    refresh_token = Column(String(512), nullable=True)
+    # Tokens are encrypted at rest when GOOGLE_TOKEN_ENCRYPTION_KEY is set.
+    access_token = Column(Text, nullable=True)
+    refresh_token = Column(Text, nullable=True)
+
+    token_expires_at = Column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    scopes = Column(Text, nullable=True)
+
+    google_email = Column(String(255), nullable=True)
+
+    last_error = Column(String(255), nullable=True)
 
     created_at = Column(
         DateTime(timezone=True),
         server_default=func.now(),
+        nullable=False,
+    )
+
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
         nullable=False,
     )
 
