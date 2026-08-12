@@ -1,6 +1,7 @@
+import json
 import os
 
-from groq import Groq
+from groq import AsyncGroq
 from sqlalchemy.orm import Session
 
 from app.repositories.user_repository import (
@@ -21,6 +22,10 @@ from app.services.conversation_service import (
 
 from app.services.prompt_builder import (
     PromptBuilder,
+)
+
+from app.services.yahoo_service import (
+    YahooFinanceService,
 )
 
 
@@ -50,14 +55,90 @@ class AIService:
         # Groq client
         # -----------------------------------------------
 
-        self.client = Groq(
+        self.client = AsyncGroq(
             api_key=os.getenv("GROQ_API_KEY")
         )
 
         self.model = os.getenv(
             "MODEL_NAME",
-            "llama-3.3-70b-versatile",
+            "openai/gpt-oss-120b",
         )
+
+        self.yahoo_service = YahooFinanceService()
+        self.tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_quote",
+                    "description": "Get current stock price and quote details for a ticker symbol.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "ticker": {"type": "string", "description": "The stock ticker symbol (e.g. AAPL)"}
+                        },
+                        "required": ["ticker"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_history",
+                    "description": "Get historical stock price data for a ticker.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "ticker": {"type": "string"},
+                            "period": {"type": "string", "description": "Period (e.g. 1mo, 1y)"},
+                            "interval": {"type": "string", "description": "Interval (e.g. 1d)"}
+                        },
+                        "required": ["ticker"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_financials",
+                    "description": "Get financial statements for a ticker.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "ticker": {"type": "string"}
+                        },
+                        "required": ["ticker"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_news",
+                    "description": "Get latest news for a ticker.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "ticker": {"type": "string"}
+                        },
+                        "required": ["ticker"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_research",
+                    "description": "Get research, recommendations, and sector information for a ticker.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "ticker": {"type": "string"}
+                        },
+                        "required": ["ticker"]
+                    }
+                }
+            }
+        ]
 
         # -----------------------------------------------
         # Repositories
@@ -93,11 +174,12 @@ class AIService:
     # MAIN CHAT METHOD
     # ===================================================
 
-    def chat(
+    async def chat(
         self,
         user_id: int,
         message: str,
         history_limit: int = 10,
+        base64_image: str = None,
     ) -> str:
         """
         Complete AI conversation workflow.
@@ -188,29 +270,97 @@ class AIService:
                 system_prompt=system_prompt,
                 history=history,
                 current_question=message,
+                base64_image=base64_image,
             )
         )
+
+        # Temporarily use vision model if image is provided
+        current_model = self.model
+        if base64_image:
+            current_model = "llama-3.2-90b-vision-preview"
 
         # -----------------------------------------------
         # 7. Call Groq
         # -----------------------------------------------
 
-        response = (
-            self.client.chat.completions.create(
-                model=self.model,
+        max_iterations = 5
+        assistant_response = None
+        for _ in range(max_iterations):
+            response = await self.client.chat.completions.create(
+                model=current_model,
                 messages=messages,
                 temperature=0.3,
-                max_completion_tokens=1024,
+                max_completion_tokens=700,
+                tools=self.tools,
+                tool_choice="auto",
             )
-        )
 
-        # -----------------------------------------------
-        # 8. Extract response
-        # -----------------------------------------------
+            # -----------------------------------------------
+            # 8. Extract response & Handle Tool Calls
+            # -----------------------------------------------
 
-        assistant_response = (
-            response.choices[0].message.content
-        )
+            response_message = response.choices[0].message
+
+            if not response_message.tool_calls:
+                assistant_response = response_message.content
+                break
+
+            message_dict = {
+                "role": response_message.role,
+                "content": response_message.content or "",
+                "tool_calls": [
+                    {
+                        "id": t.id,
+                        "type": t.type,
+                        "function": {
+                            "name": t.function.name,
+                            "arguments": t.function.arguments,
+                        }
+                    } for t in response_message.tool_calls
+                ]
+            }
+            messages.append(message_dict)
+
+            for tool_call in response_message.tool_calls:
+                function_name = tool_call.function.name
+                function_args = json.loads(tool_call.function.arguments)
+
+                tool_result = ""
+                try:
+                    if function_name == "get_quote":
+                        res = await self.yahoo_service.quote(ticker=function_args.get("ticker"))
+                        tool_result = json.dumps(res)
+                    elif function_name == "get_history":
+                        res = await self.yahoo_service.history(
+                            ticker=function_args.get("ticker"), 
+                            period=function_args.get("period", "1mo"),
+                            interval=function_args.get("interval", "1d")
+                        )
+                        tool_result = json.dumps(res)
+                    elif function_name == "get_financials":
+                        res = await self.yahoo_service.financials(ticker=function_args.get("ticker"))
+                        tool_result = json.dumps(res)
+                    elif function_name == "get_news":
+                        res = await self.yahoo_service.news(ticker=function_args.get("ticker"))
+                        tool_result = json.dumps(res)
+                    elif function_name == "get_research":
+                        res = await self.yahoo_service.research(ticker=function_args.get("ticker"))
+                        tool_result = json.dumps(res)
+                    else:
+                        tool_result = f"Unknown function: {function_name}"
+                except Exception as e:
+                    tool_result = f"Error calling function {function_name}: {str(e)}"
+
+                messages.append(
+                    {
+                        "tool_call_id": tool_call.id,
+                        "role": "tool",
+                        "name": function_name,
+                        "content": tool_result or "{}",
+                    }
+                )
+        else:
+            assistant_response = "I had to call too many functions and couldn't finish."
 
         if not assistant_response:
 

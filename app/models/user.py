@@ -61,3 +61,9 @@ class User(Base):
         cascade="all, delete-orphan",
         order_by="ConversationHistory.created_at",
     )
+
+    integrations = relationship(
+        "UserIntegration",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )

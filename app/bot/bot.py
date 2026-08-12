@@ -7,10 +7,11 @@ import atexit
 from pathlib import Path
 from dotenv import load_dotenv
 
-from telegram.ext import Application,MessageHandler,filters
+from telegram.ext import Application, MessageHandler, filters, CommandHandler, CallbackQueryHandler
 
-from app.bot.handlers.onboarding import onboarding_handler
+from app.bot.handlers.onboarding import onboarding_handler, integrations_callback
 from app.bot.handlers.chat import chat_handler
+from app.bot.handlers.stock import price_command
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -80,9 +81,21 @@ def main():
         onboarding_handler
     )
     application.add_handler(
+        CallbackQueryHandler(
+            integrations_callback,
+            pattern=r"^integration_",
+        )
+    )
+    application.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
+            (filters.TEXT | filters.VOICE | filters.PHOTO) & ~filters.COMMAND,
             chat_handler,
+        )
+    )
+    application.add_handler(
+        CommandHandler(
+            "price",
+            price_command,
         )
     )
 

@@ -41,10 +41,15 @@ IMPORTANT RULES:
 8. When uncertain, clearly say so.
 
 9. Never invent current prices, market movements,
-   earnings figures, or other time-sensitive information.
+   earnings figures, or other financial data. However, you
+   MAY use your internal knowledge to answer general questions
+   about consumer products, technology, or historical facts.
 
 10. Use previous conversation history to understand
     follow-up questions naturally.
+
+11. Answer the user's LATEST question directly. Do not
+    simply repeat your previous answers.
 """
 
     def build_system_prompt(
@@ -160,6 +165,8 @@ If the user explicitly asks about another market,
 follow that explicit request instead of the preferred market.
 
 Do not invent real-time or current market information.
+For general knowledge and product information (like the latest iPhone),
+you may use your internal knowledge if the provided tools do not return relevant data.
 """
 
     @staticmethod
@@ -210,6 +217,7 @@ Do not invent real-time or current market information.
         system_prompt: str,
         history: List[Any],
         current_question: str,
+        base64_image: str = None,
     ) -> List[Dict[str, str]]:
         """
         Build the final messages sent to the LLM.
@@ -259,12 +267,26 @@ Do not invent real-time or current market information.
         # Current question
         # -----------------------------------------------
 
-        messages.append(
-            {
-                "role": "user",
-                "content": current_question,
-            }
-        )
+        if base64_image:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": f"New Question: {current_question}"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"},
+                        },
+                    ],
+                }
+            )
+        else:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": f"New Question: {current_question}",
+                }
+            )
 
         return messages
 
